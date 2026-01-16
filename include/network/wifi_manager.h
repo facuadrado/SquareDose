@@ -25,6 +25,8 @@ public:
 
     bool getCredentials(String& ssid, String& password);
 
+    bool clearCredentials();
+
     bool switchToSTAMode();
 
     bool switchToAPMode();
@@ -59,6 +61,8 @@ private:
     bool loadCredentialsFromNVS();
 
     bool saveCredentialsToNVS(const char* ssid, const char* password);
+
+    bool clearCredentialsFromNVS();
 
     bool connectToSTA();
 

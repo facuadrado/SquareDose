@@ -86,6 +86,28 @@ bool WiFiManager::getCredentials(String& ssid, String& password) {
     return false;
 }
 
+bool WiFiManager::clearCredentials() {
+    // Thread-safe: Lock before clearing credentials
+    if (xSemaphoreTake(stateMutex, portMAX_DELAY) == pdTRUE) {
+        if (!clearCredentialsFromNVS()) {
+            xSemaphoreGive(stateMutex);
+            Serial.println("[WiFiManager] Failed to clear credentials from NVS");
+            return false;
+        }
+
+        currentSSID = "";
+        currentPassword = "";
+        credentialsLoaded = false;
+
+        xSemaphoreGive(stateMutex);
+        Serial.println("[WiFiManager] Credentials cleared successfully");
+        return true;
+    }
+
+    Serial.println("[WiFiManager] Failed to acquire mutex");
+    return false;
+}
+
 bool WiFiManager::switchToSTAMode() {
     // Thread-safe: Lock before mode switch
     if (xSemaphoreTake(stateMutex, portMAX_DELAY) == pdTRUE) {
@@ -324,6 +346,29 @@ bool WiFiManager::saveCredentialsToNVS(const char* ssid, const char* password) {
     return success;
 }
 
+bool WiFiManager::clearCredentialsFromNVS() {
+    if (!preferences.begin(NVS_NAMESPACE, false)) {
+        Serial.println("[WiFiManager] Failed to open NVS namespace for clearing");
+        return false;
+    }
+
+    bool success = true;
+
+    if (!preferences.remove(NVS_SSID_KEY)) {
+        Serial.println("[WiFiManager] Failed to remove SSID from NVS");
+        success = false;
+    }
+
+    if (!preferences.remove(NVS_PASSWORD_KEY)) {
+        Serial.println("[WiFiManager] Failed to remove password from NVS");
+        success = false;
+    }
+
+    preferences.end();
+
+    return success;
+}
+
 bool WiFiManager::connectToSTA() {
     if (!credentialsLoaded) {
         return false;
@@ -338,6 +383,8 @@ bool WiFiManager::connectToSTA() {
 
     while (WiFi.status() != WL_CONNECTED &&
            millis() - startAttemptTime < WIFI_STA_TIMEOUT_MS) {
+        // Yield to other tasks to prevent watchdog timeout
+        yield();
         vTaskDelay(100 / portTICK_PERIOD_MS);
     }
 
