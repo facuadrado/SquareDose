@@ -112,14 +112,16 @@ void WebServer::setupRoutes() {
                   this->handlePostSchedule(request, data, len, index, total);
               });
 
-    // Schedule by head index (GET /api/schedules/0, DELETE /api/schedules/0)
-    server->on("^\\/api\\/schedules\\/([0-3])$", HTTP_GET, [this](AsyncWebServerRequest* request) {
-        this->handleGetSchedule(request);
-    });
+    // Schedule by head index using AsyncWebHandler (GET /api/schedules/0, DELETE /api/schedules/0)
+    server->on("/api/schedules/0", HTTP_GET, [this](AsyncWebServerRequest* request) { this->handleGetSchedule(request); });
+    server->on("/api/schedules/1", HTTP_GET, [this](AsyncWebServerRequest* request) { this->handleGetSchedule(request); });
+    server->on("/api/schedules/2", HTTP_GET, [this](AsyncWebServerRequest* request) { this->handleGetSchedule(request); });
+    server->on("/api/schedules/3", HTTP_GET, [this](AsyncWebServerRequest* request) { this->handleGetSchedule(request); });
 
-    server->on("^\\/api\\/schedules\\/([0-3])$", HTTP_DELETE, [this](AsyncWebServerRequest* request) {
-        this->handleDeleteSchedule(request);
-    });
+    server->on("/api/schedules/0", HTTP_DELETE, [this](AsyncWebServerRequest* request) { this->handleDeleteSchedule(request); });
+    server->on("/api/schedules/1", HTTP_DELETE, [this](AsyncWebServerRequest* request) { this->handleDeleteSchedule(request); });
+    server->on("/api/schedules/2", HTTP_DELETE, [this](AsyncWebServerRequest* request) { this->handleDeleteSchedule(request); });
+    server->on("/api/schedules/3", HTTP_DELETE, [this](AsyncWebServerRequest* request) { this->handleDeleteSchedule(request); });
 
     // 404 handler
     server->onNotFound([](AsyncWebServerRequest* request) {
