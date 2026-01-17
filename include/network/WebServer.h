@@ -6,6 +6,7 @@
 #include "hal/DosingHead.h"
 #include "hal/MotorDriver.h"
 #include "network/wifi_manager.h"
+#include "scheduling/ScheduleManager.h"
 
 /**
  * @brief AsyncWebServer wrapper for SquareDose REST API and WebSocket
@@ -16,6 +17,7 @@
  * - Calibration management
  * - Emergency stop
  * - WiFi management
+ * - Schedule management (CRUD operations)
  *
  * WebSocket for real-time updates of dosing progress
  *
@@ -36,9 +38,10 @@ public:
      * @param numHeads Number of dosing heads (must be 4)
      * @param motorDriver Pointer to MotorDriver instance
      * @param wifiMgr Pointer to WiFiManager instance
+     * @param schedMgr Pointer to ScheduleManager instance (optional)
      * @return true if initialization successful
      */
-    bool begin(DosingHead** dosingHeads, uint8_t numHeads, MotorDriver* motorDriver, WiFiManager* wifiMgr);
+    bool begin(DosingHead** dosingHeads, uint8_t numHeads, MotorDriver* motorDriver, WiFiManager* wifiMgr, ScheduleManager* schedMgr = nullptr);
 
     /**
      * @brief Stop the web server
@@ -64,6 +67,7 @@ private:
     uint8_t numHeads;
     MotorDriver* motorDriver;
     WiFiManager* wifiManager;
+    ScheduleManager* scheduleManager;
     bool running;
 
     // REST API Handlers
@@ -76,6 +80,12 @@ private:
     void handlePostWifiConfigure(AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total);
     void handlePostWifiReset(AsyncWebServerRequest* request);
 
+    // Schedule API Handlers
+    void handleGetAllSchedules(AsyncWebServerRequest* request);
+    void handleGetSchedule(AsyncWebServerRequest* request);
+    void handlePostSchedule(AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total);
+    void handleDeleteSchedule(AsyncWebServerRequest* request);
+
     // WebSocket Handlers
     void handleWebSocketEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
                              AwsEventType type, void* arg, uint8_t* data, size_t len);
@@ -86,6 +96,7 @@ private:
     void sendErrorResponse(AsyncWebServerRequest* request, int code, const String& message);
     bool validateDosingRequest(const JsonDocument& doc, uint8_t& head, float& volume, String& error);
     bool validateCalibrationRequest(const JsonDocument& doc, uint8_t& head, float& actualVolume, String& error);
+    bool validateScheduleRequest(const JsonDocument& doc, Schedule& sched, String& error);
 
     // WebSocket event handler wrapper (for C-style callback)
     static void onWebSocketEventStatic(AsyncWebSocket* server, AsyncWebSocketClient* client,

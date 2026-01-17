@@ -5,13 +5,13 @@ static WebServer* serverInstance = nullptr;
 
 WebServer::WebServer(uint16_t port)
     : server(nullptr), ws(nullptr), dosingHeads(nullptr), numHeads(0),
-      motorDriver(nullptr), wifiManager(nullptr), running(false) {
+      motorDriver(nullptr), wifiManager(nullptr), scheduleManager(nullptr), running(false) {
     server = new AsyncWebServer(port);
     ws = new AsyncWebSocket("/ws");
     serverInstance = this;
 }
 
-bool WebServer::begin(DosingHead** heads, uint8_t num, MotorDriver* motor, WiFiManager* wifiMgr) {
+bool WebServer::begin(DosingHead** heads, uint8_t num, MotorDriver* motor, WiFiManager* wifiMgr, ScheduleManager* schedMgr) {
     if (running) {
         return true;
     }
@@ -24,6 +24,7 @@ bool WebServer::begin(DosingHead** heads, uint8_t num, MotorDriver* motor, WiFiM
     numHeads = num;
     motorDriver = motor;
     wifiManager = wifiMgr;
+    scheduleManager = schedMgr;
 
     // Setup WebSocket
     ws->onEvent(onWebSocketEventStatic);
@@ -98,6 +99,26 @@ void WebServer::setupRoutes() {
 
     server->on("/api/wifi/reset", HTTP_POST, [this](AsyncWebServerRequest* request) {
         this->handlePostWifiReset(request);
+    });
+
+    // Schedule management endpoints
+    server->on("/api/schedules", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        this->handleGetAllSchedules(request);
+    });
+
+    server->on("/api/schedules", HTTP_POST, [](AsyncWebServerRequest* request) {},
+              nullptr,
+              [this](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
+                  this->handlePostSchedule(request, data, len, index, total);
+              });
+
+    // Schedule by head index (GET /api/schedules/0, DELETE /api/schedules/0)
+    server->on("^\\/api\\/schedules\\/([0-3])$", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        this->handleGetSchedule(request);
+    });
+
+    server->on("^\\/api\\/schedules\\/([0-3])$", HTTP_DELETE, [this](AsyncWebServerRequest* request) {
+        this->handleDeleteSchedule(request);
     });
 
     // 404 handler
@@ -461,6 +482,244 @@ bool WebServer::validateCalibrationRequest(const JsonDocument& doc, uint8_t& hea
     if (actualVolume <= 0.0f) {
         error = "Invalid actual volume: " + String(actualVolume);
         return false;
+    }
+
+    return true;
+}
+
+void WebServer::handleGetAllSchedules(AsyncWebServerRequest* request) {
+    if (scheduleManager == nullptr) {
+        sendErrorResponse(request, 503, "Schedule manager not available");
+        return;
+    }
+
+    Schedule schedules[NUM_SCHEDULE_HEADS];
+    uint8_t count = scheduleManager->getAllSchedules(schedules);
+
+    JsonDocument doc;
+    JsonArray schedulesArray = doc["schedules"].to<JsonArray>();
+
+    for (uint8_t i = 0; i < count; i++) {
+        JsonObject schedObj = schedulesArray.add<JsonObject>();
+        schedObj["head"] = schedules[i].head;
+        schedObj["name"] = schedules[i].name;
+        schedObj["type"] = static_cast<uint8_t>(schedules[i].type);
+        schedObj["enabled"] = schedules[i].enabled;
+        schedObj["volume"] = schedules[i].volume;
+        schedObj["timestamp"] = schedules[i].timestamp;
+        schedObj["lastExecutionTime"] = schedules[i].lastExecutionTime;
+        schedObj["executionCount"] = schedules[i].executionCount;
+        schedObj["createdAt"] = schedules[i].createdAt;
+        schedObj["updatedAt"] = schedules[i].updatedAt;
+    }
+
+    doc["count"] = count;
+    sendJsonResponse(request, 200, doc);
+}
+
+void WebServer::handleGetSchedule(AsyncWebServerRequest* request) {
+    if (scheduleManager == nullptr) {
+        sendErrorResponse(request, 503, "Schedule manager not available");
+        return;
+    }
+
+    // Extract head from URL path parameter
+    String path = request->url();
+    int lastSlash = path.lastIndexOf('/');
+    if (lastSlash == -1) {
+        sendErrorResponse(request, 400, "Invalid URL format");
+        return;
+    }
+
+    String headStr = path.substring(lastSlash + 1);
+    uint8_t head = headStr.toInt();
+
+    if (head >= NUM_SCHEDULE_HEADS) {
+        sendErrorResponse(request, 400, "Invalid head index: " + String(head));
+        return;
+    }
+
+    Schedule sched;
+    if (!scheduleManager->getSchedule(head, sched)) {
+        sendErrorResponse(request, 404, "Schedule not found for head " + String(head));
+        return;
+    }
+
+    JsonDocument doc;
+    doc["head"] = sched.head;
+    doc["name"] = sched.name;
+    doc["type"] = static_cast<uint8_t>(sched.type);
+    doc["enabled"] = sched.enabled;
+    doc["volume"] = sched.volume;
+    doc["timestamp"] = sched.timestamp;
+    doc["lastExecutionTime"] = sched.lastExecutionTime;
+    doc["executionCount"] = sched.executionCount;
+    doc["createdAt"] = sched.createdAt;
+    doc["updatedAt"] = sched.updatedAt;
+
+    sendJsonResponse(request, 200, doc);
+}
+
+void WebServer::handlePostSchedule(AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
+    if (scheduleManager == nullptr) {
+        sendErrorResponse(request, 503, "Schedule manager not available");
+        return;
+    }
+
+    // Only process if we have the complete body
+    if (index + len != total) {
+        return;
+    }
+
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, data, len);
+
+    if (error) {
+        sendErrorResponse(request, 400, "Invalid JSON: " + String(error.c_str()));
+        return;
+    }
+
+    Schedule sched;
+    String validationError;
+
+    if (!validateScheduleRequest(doc, sched, validationError)) {
+        sendErrorResponse(request, 400, validationError);
+        return;
+    }
+
+    // Set timestamps
+    uint32_t now = millis() / 1000;
+    sched.createdAt = now;
+    sched.updatedAt = now;
+
+    // Save schedule
+    bool success = scheduleManager->setSchedule(sched);
+
+    JsonDocument responseDoc;
+    responseDoc["success"] = success;
+    responseDoc["head"] = sched.head;
+
+    if (success) {
+        responseDoc["message"] = "Schedule created/updated successfully";
+    } else {
+        responseDoc["error"] = "Failed to save schedule";
+    }
+
+    sendJsonResponse(request, success ? 200 : 500, responseDoc);
+}
+
+void WebServer::handleDeleteSchedule(AsyncWebServerRequest* request) {
+    if (scheduleManager == nullptr) {
+        sendErrorResponse(request, 503, "Schedule manager not available");
+        return;
+    }
+
+    // Extract head from URL path parameter
+    String path = request->url();
+    int lastSlash = path.lastIndexOf('/');
+    if (lastSlash == -1) {
+        sendErrorResponse(request, 400, "Invalid URL format");
+        return;
+    }
+
+    String headStr = path.substring(lastSlash + 1);
+    uint8_t head = headStr.toInt();
+
+    if (head >= NUM_SCHEDULE_HEADS) {
+        sendErrorResponse(request, 400, "Invalid head index: " + String(head));
+        return;
+    }
+
+    bool success = scheduleManager->deleteSchedule(head);
+
+    JsonDocument doc;
+    doc["success"] = success;
+    doc["head"] = head;
+
+    if (success) {
+        doc["message"] = "Schedule deleted successfully";
+    } else {
+        doc["error"] = "Failed to delete schedule";
+    }
+
+    sendJsonResponse(request, success ? 200 : 500, doc);
+}
+
+bool WebServer::validateScheduleRequest(const JsonDocument& doc, Schedule& sched, String& error) {
+    // Validate required fields
+    if (!doc["head"].is<uint8_t>()) {
+        error = "Missing required field: head";
+        return false;
+    }
+
+    if (!doc["type"].is<uint8_t>()) {
+        error = "Missing required field: type";
+        return false;
+    }
+
+    if (!doc["volume"].is<float>()) {
+        error = "Missing required field: volume";
+        return false;
+    }
+
+    if (!doc["timestamp"].is<uint32_t>()) {
+        error = "Missing required field: timestamp";
+        return false;
+    }
+
+    // Extract values
+    sched.head = doc["head"];
+    sched.type = static_cast<ScheduleType>(doc["type"].as<uint8_t>());
+    sched.volume = doc["volume"];
+    sched.timestamp = doc["timestamp"];
+
+    // Optional fields
+    sched.enabled = doc["enabled"].is<bool>() ? doc["enabled"].as<bool>() : true;
+
+    if (doc["name"].is<const char*>()) {
+        strncpy(sched.name, doc["name"], sizeof(sched.name) - 1);
+        sched.name[sizeof(sched.name) - 1] = '\0';
+    } else {
+        snprintf(sched.name, sizeof(sched.name), "Schedule %d", sched.head);
+    }
+
+    // Initialize execution tracking
+    sched.lastExecutionTime = 0;
+    sched.executionCount = 0;
+
+    // Validate values
+    if (sched.head >= NUM_SCHEDULE_HEADS) {
+        error = "Invalid head index: " + String(sched.head) + " (must be 0-3)";
+        return false;
+    }
+
+    if (sched.volume <= 0.0f || sched.volume > 1000.0f) {
+        error = "Invalid volume: " + String(sched.volume) + " (must be 0.1-1000 mL)";
+        return false;
+    }
+
+    // Validate type-specific constraints
+    switch (sched.type) {
+        case ScheduleType::ONCE:
+            // timestamp should be a future Unix epoch time
+            break;
+        case ScheduleType::DAILY:
+            // timestamp should be seconds since midnight (0-86399)
+            if (sched.timestamp >= 86400) {
+                error = "Invalid DAILY timestamp: " + String(sched.timestamp) + " (must be 0-86399 seconds since midnight)";
+                return false;
+            }
+            break;
+        case ScheduleType::INTERVAL:
+            // timestamp should be interval in seconds (minimum 60 seconds)
+            if (sched.timestamp < 60) {
+                error = "Invalid INTERVAL timestamp: " + String(sched.timestamp) + " (must be >= 60 seconds)";
+                return false;
+            }
+            break;
+        default:
+            error = "Invalid schedule type: " + String(static_cast<uint8_t>(sched.type));
+            return false;
     }
 
     return true;
