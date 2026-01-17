@@ -171,11 +171,17 @@ void ScheduleManager::checkAndExecute(uint32_t currentTime, DosingHead** dosingH
     if (xSemaphoreTake(mutex, portMAX_DELAY) == pdTRUE) {
         for (uint8_t head = 0; head < NUM_SCHEDULE_HEADS; head++) {
             if (cacheValid[head] && scheduleCache[head].enabled) {
-                Schedule& sched = scheduleCache[head];
+                Schedule sched = scheduleCache[head]; // Make a COPY
 
                 if (sched.shouldExecute(currentTime)) {
-                    Serial.printf("[ScheduleManager] Executing schedule for head %d\n", head);
-                    executeSchedule(sched, dosingHeads);
+                    // CRITICAL: Release mutex before blocking operation!
+                    xSemaphoreGive(mutex);
+
+                    // Execute dose (this is a BLOCKING operation that takes seconds)
+                    executeSchedule(sched, dosingHeads, currentTime);
+
+                    // Reacquire mutex to continue loop
+                    xSemaphoreTake(mutex, portMAX_DELAY);
                 }
             }
         }
@@ -224,7 +230,7 @@ void ScheduleManager::reloadCache() {
     Serial.println("[ScheduleManager] Cache reload complete");
 }
 
-void ScheduleManager::executeSchedule(Schedule& sched, DosingHead** dosingHeads) {
+void ScheduleManager::executeSchedule(Schedule& sched, DosingHead** dosingHeads, uint32_t currentTime) {
     if (sched.head >= NUM_SCHEDULE_HEADS) {
         Serial.printf("[ScheduleManager] Invalid head index in schedule: %d\n", sched.head);
         return;
@@ -246,9 +252,8 @@ void ScheduleManager::executeSchedule(Schedule& sched, DosingHead** dosingHeads)
         Serial.printf("[ScheduleManager] Scheduled dose complete: Head %d, Volume %.2f mL, Runtime %lu ms\n",
                      sched.head, result.estimatedVolume, result.actualRuntime);
 
-        // Update last execution time
-        uint32_t now = millis() / 1000; // Convert to seconds (Unix-like timestamp)
-        updateLastExecution(sched.head, now);
+        // Update last execution time with the SAME time used for checking
+        updateLastExecution(sched.head, currentTime);
 
         // If this was a ONCE schedule, disable it after execution
         if (sched.type == ScheduleType::ONCE) {

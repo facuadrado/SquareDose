@@ -83,16 +83,12 @@ void SchedulerTask::run() {
     Serial.println("[SchedulerTask] Task loop started");
 
     while (running) {
-        // Get current time
+        // Get current time (Unix epoch if available, otherwise millis/1000)
         uint32_t currentTime = getCurrentTime();
 
-        if (currentTime > 0) {
-            // Check and execute schedules
-            scheduleManager->checkAndExecute(currentTime, dosingHeads);
-        } else {
-            // Time not available yet (NTP not synced, etc.)
-            // This is normal during startup
-        }
+        // Check and execute schedules
+        // INTERVAL schedules work with millis(), ONCE/DAILY need real time
+        scheduleManager->checkAndExecute(currentTime, dosingHeads);
 
         // Wait 1 second before next check
         vTaskDelay(SCHEDULER_CHECK_INTERVAL_MS / portTICK_PERIOD_MS);
@@ -106,10 +102,12 @@ uint32_t SchedulerTask::getCurrentTime() {
     time_t now;
     time(&now);
 
-    // If time is not set (before year 2000), return 0
-    if (now < 946684800) {  // Jan 1, 2000
-        return 0;
+    // If time is set (after year 2000), return Unix epoch
+    if (now >= 946684800) {  // Jan 1, 2000
+        return static_cast<uint32_t>(now);
     }
 
-    return static_cast<uint32_t>(now);
+    // Otherwise use millis() / 1000 as fallback for INTERVAL schedules
+    // This allows INTERVAL schedules to work without NTP
+    return millis() / 1000;
 }

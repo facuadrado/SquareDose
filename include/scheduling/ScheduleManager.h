@@ -91,8 +91,9 @@ private:
      * @brief Execute a scheduled dose
      * @param sched Schedule to execute
      * @param dosingHeads Array of dosing head pointers
+     * @param currentTime Current time (same as used for shouldExecute check)
      */
-    void executeSchedule(Schedule& sched, DosingHead** dosingHeads);
+    void executeSchedule(Schedule& sched, DosingHead** dosingHeads, uint32_t currentTime);
 };
 
 #endif // SCHEDULE_MANAGER_H
