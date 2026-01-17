@@ -210,12 +210,12 @@ Each phase is a self-contained feature module with complete vertical slice inclu
 
 ### Module 5: Scheduling System - Schedule Management & Execution
 
-**Description**: Schedule storage, CRUD operations, and scheduler task that triggers doses at the right time
+**Description**: Schedule storage, CRUD operations, and scheduler task that triggers doses at the right time. **One schedule per dosing head (4 total)**.
 
 **Deliverables**:
 - Schedule data structure (ONCE, DAILY, INTERVAL types)
-- ScheduleStore for NVS persistence (up to 100 schedules)
-- Schedule CRUD logic (create, read, update, delete)
+- ScheduleStore for NVS persistence (4 schedules, one per head)
+- Schedule CRUD logic (create, read, update, delete per head)
 - SchedulerTask (FreeRTOS task, checks schedules every 1s)
 - Schedule validation (time ranges, conflicts, etc.)
 - REST API integration (endpoints handled by Module 3)
