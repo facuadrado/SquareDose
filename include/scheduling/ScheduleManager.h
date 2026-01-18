@@ -6,6 +6,9 @@
 #include "scheduling/ScheduleStore.h"
 #include "hal/DosingHead.h"
 
+// Forward declaration to avoid circular dependency
+class DosingLogManager;
+
 /**
  * @brief High-level schedule management with thread safety
  *
@@ -73,10 +76,17 @@ public:
      */
     void updateLastExecution(uint8_t head, uint32_t executionTime);
 
+    /**
+     * @brief Set the dosing log manager for logging scheduled doses
+     * @param logManager Pointer to DosingLogManager instance (optional)
+     */
+    void setLogManager(DosingLogManager* logManager);
+
 private:
     ScheduleStore store;
     SemaphoreHandle_t mutex;
     bool initialized;
+    DosingLogManager* logManager;  // Pointer to log manager for scheduled doses
 
     // In-memory cache of schedules for fast access
     Schedule scheduleCache[NUM_SCHEDULE_HEADS];

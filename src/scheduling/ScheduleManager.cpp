@@ -1,6 +1,7 @@
 #include "scheduling/ScheduleManager.h"
+#include "logs/DosingLogManager.h"
 
-ScheduleManager::ScheduleManager() : mutex(nullptr), initialized(false) {
+ScheduleManager::ScheduleManager() : mutex(nullptr), initialized(false), logManager(nullptr) {
     // Initialize cache validity flags to false
     for (uint8_t i = 0; i < NUM_SCHEDULE_HEADS; i++) {
         cacheValid[i] = false;
@@ -252,17 +253,22 @@ void ScheduleManager::executeSchedule(Schedule& sched, DosingHead** dosingHeads,
         Serial.printf("[ScheduleManager] Scheduled dose complete: Head %d, Volume %.2f mL, Runtime %lu ms\n",
                      sched.head, result.estimatedVolume, result.actualRuntime);
 
+        // Log scheduled dose if log manager is configured
+        if (logManager != nullptr) {
+            logManager->logScheduledDose(sched.head, result.estimatedVolume, currentTime);
+        }
+
         // Update last execution time with the SAME time used for checking
         updateLastExecution(sched.head, currentTime);
-
-        // If this was a ONCE schedule, disable it after execution
-        if (sched.type == ScheduleType::ONCE) {
-            sched.enabled = false;
-            store.saveSchedule(sched);
-            Serial.printf("[ScheduleManager] ONCE schedule for head %d completed and disabled\n", sched.head);
-        }
     } else {
         Serial.printf("[ScheduleManager] Scheduled dose failed: Head %d, Error: %s\n",
                      sched.head, result.errorMessage.c_str());
+    }
+}
+
+void ScheduleManager::setLogManager(DosingLogManager* logMgr) {
+    logManager = logMgr;
+    if (logManager != nullptr) {
+        Serial.println("[ScheduleManager] Log manager configured");
     }
 }

@@ -4,32 +4,26 @@
 #include <Arduino.h>
 
 /**
- * @brief Schedule type enumeration
- */
-enum class ScheduleType : uint8_t {
-    ONCE = 0,      // One-time schedule at specific date/time
-    DAILY = 1,     // Repeats daily at specific time
-    INTERVAL = 2   // Repeats at fixed interval
-};
-
-/**
  * @brief Schedule data structure
+ *
+ * Simplified: Only supports INTERVAL-based schedules
+ * User specifies total daily volume and number of doses per day
+ * System auto-calculates per-dose volume and interval
  *
  * One schedule per dosing head (4 total)
  * Head index (0-3) serves as the schedule identifier
  */
 struct Schedule {
     uint8_t head;                   // Dosing head index (0-3) - also serves as schedule ID
-    ScheduleType type;              // ONCE, DAILY, or INTERVAL
     bool enabled;                   // Whether schedule is active
 
-    float volume;                   // Volume to dispense in mL
+    // User inputs
+    float dailyTargetVolume;        // Total mL per day (e.g., 24.0)
+    uint16_t dosesPerDay;           // Number of doses per day (e.g., 12, max 1440)
 
-    // Time configuration (interpretation depends on type)
-    // ONCE: timestamp is Unix epoch time for when to run
-    // DAILY: timestamp is time of day (seconds since midnight, repeated daily)
-    // INTERVAL: timestamp is interval in seconds between doses
-    uint32_t timestamp;
+    // Auto-calculated fields (derived from dailyTargetVolume + dosesPerDay)
+    float volume;                   // Volume per dose in mL (dailyTargetVolume / dosesPerDay)
+    uint32_t intervalSeconds;       // Interval in seconds between doses (86400 / dosesPerDay)
 
     // Last execution tracking
     uint32_t lastExecutionTime;     // Unix epoch time of last execution
@@ -43,6 +37,7 @@ struct Schedule {
     // Helper methods
     bool isValid() const;
     bool shouldExecute(uint32_t currentTime) const;
+    bool calculateFromDailyTarget();  // Calculate volume & intervalSeconds from dailyTarget + dosesPerDay
     String toString() const;
 };
 
