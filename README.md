@@ -210,23 +210,118 @@ Each phase is a self-contained feature module with complete vertical slice inclu
 
 ### Module 5: Scheduling System - Schedule Management & Execution
 
-**Description**: Schedule storage, CRUD operations, and scheduler task that triggers doses at the right time. **One schedule per dosing head (4 total)**.
+**Description**: Schedule storage, CRUD operations, and scheduler task that triggers doses at the right time. **One schedule per dosing head (4 total)**. Simplified to only support interval-based schedules with automatic calculation from daily targets.
 
 **Deliverables**:
-- Schedule data structure (ONCE, DAILY, INTERVAL types)
+- Schedule data structure (interval-based only)
 - ScheduleStore for NVS persistence (4 schedules, one per head)
 - Schedule CRUD logic (create, read, update, delete per head)
 - SchedulerTask (FreeRTOS task, checks schedules every 1s)
-- Schedule validation (time ranges, conflicts, etc.)
+- Schedule validation (volume, doses per day limits)
 - REST API integration (endpoints handled by Module 3)
-- Unit tests for schedule logic
+- Automatic volume/interval calculation from dailyTargetVolume + dosesPerDay
 
 **Integration points**:
 - Calls DosingHead module when schedule triggers
 - Integrates with WebServer module for schedule CRUD endpoints
 - Uses NTP time from WiFi module
 
-**Success criteria**: Schedules persist across reboots, trigger doses within ±1s of target time, handle all schedule types, can sync from cloud
+**Success criteria**: Schedules persist across reboots, trigger doses within ±1s of target time, user-friendly schedule input (no manual interval calculation)
+
+---
+
+### Module 5.5: Dosing Logs & Analytics - Usage Tracking System
+
+**Description**: Track and aggregate dosing data per hour for dashboard analytics and detailed logs. Separates scheduled vs ad-hoc doses for better insights.
+
+**User Experience**:
+- **Simplified Schedule Input**: Users specify daily target and frequency (e.g., "24mL per day, 12 doses") instead of calculating intervals
+  - System auto-calculates: volume per dose (2mL) and interval (2 hours)
+  - More intuitive than manual interval calculation
+  - No need to choose schedule type - all schedules are interval-based
+
+**Deliverables**:
+
+1. **Simplified Schedule Structure**:
+   - `dailyTargetVolume` and `dosesPerDay` are the only user inputs
+   - System auto-calculates `volume` and `intervalSeconds` from user inputs
+   - Example: `dailyTarget=24mL, dosesPerDay=12` → `volume=2mL, interval=7200s`
+   - Removed ONCE and DAILY schedule types for simplicity
+
+2. **Hourly Dosing Logs** (NVS Storage):
+   - `HourlyDoseLog` structure: hour timestamp, head, scheduledVolume, adhocVolume
+   - Store 14 days of hourly data (336 hours × 4 heads = ~17KB)
+   - Separate tracking for scheduled vs ad-hoc doses per hour
+   - Automatic hour rollover and old data pruning
+
+3. **DosingLogManager**:
+   - Thread-safe log writing with FreeRTOS mutex
+   - CRUD operations for hourly logs
+   - Integration with DosingHead and ScheduleManager to log all doses
+   - Aggregate queries (today's total, specific hour, date range)
+
+4. **Dashboard API** (`GET /api/logs/dashboard`):
+   - Returns daily summary for all 4 heads
+   - Shows: `dailyTarget`, `scheduledActual`, `adhocTotal`, `dosesPerDay`, `perDoseVolume`
+   - Format: "6/24mL + 5mL" (6mL scheduled of 24mL target + 5mL ad-hoc)
+
+5. **Hourly Grid API** (`GET /api/logs/hourly?hours=24`):
+   - Matrix view: rows = hours (0-23), columns = heads (0-3)
+   - Values = total mL per hour (scheduled + adhoc combined)
+   - Filterable by date range
+
+**Data Structures**:
+```cpp
+// Simplified Schedule - interval-based only
+struct Schedule {
+    uint8_t head;               // Dosing head (0-3)
+    bool enabled;
+    char name[32];
+
+    // User inputs
+    float dailyTargetVolume;    // e.g., 24.0 mL
+    uint16_t dosesPerDay;       // e.g., 12 doses (max 1440)
+
+    // Auto-calculated fields
+    float volume;               // 24/12 = 2.0 mL per dose
+    uint32_t intervalSeconds;   // 86400/12 = 7200s interval
+
+    // Execution tracking
+    uint32_t lastExecutionTime;
+    uint32_t executionCount;
+    // ...
+};
+
+// Hourly log storage
+struct HourlyDoseLog {
+    uint32_t hourTimestamp;     // Unix epoch rounded to hour
+    uint8_t head;               // 0-3
+    float scheduledVolume;      // mL from scheduled doses
+    float adhocVolume;          // mL from manual doses
+};
+```
+
+**REST API Endpoints**:
+```
+POST   /api/schedules           - Create with dailyTarget + dosesPerDay
+GET    /api/logs/dashboard      - Daily summary for all heads
+GET    /api/logs/hourly         - Hourly grid (default: last 24 hours)
+GET    /api/logs/hourly?hours=N - Last N hours
+GET    /api/logs/hourly?start=X&end=Y - Specific hour range
+```
+
+**Integration Points**:
+- DosingHead.dispense() → log ad-hoc doses
+- ScheduleManager.executeSchedule() → log scheduled doses
+- Uses NTP time from WiFi module for hour alignment
+
+**Success Criteria**:
+- All doses logged with correct scheduled/adhoc classification
+- Dashboard shows accurate daily progress vs target
+- Hourly grid provides detailed usage breakdown
+- Logs persist across reboots
+- 14 days of history maintained
+- Schedule creation simplified (no manual interval calculation)
 
 ---
 

@@ -1,17 +1,20 @@
 #include "network/WebServer.h"
+#include "logs/DosingLogManager.h"
+#include <time.h>
 
 // Static instance pointer for WebSocket callback
 static WebServer* serverInstance = nullptr;
 
 WebServer::WebServer(uint16_t port)
     : server(nullptr), ws(nullptr), dosingHeads(nullptr), numHeads(0),
-      motorDriver(nullptr), wifiManager(nullptr), scheduleManager(nullptr), running(false) {
+      motorDriver(nullptr), wifiManager(nullptr), scheduleManager(nullptr),
+      logManager(nullptr), running(false) {
     server = new AsyncWebServer(port);
     ws = new AsyncWebSocket("/ws");
     serverInstance = this;
 }
 
-bool WebServer::begin(DosingHead** heads, uint8_t num, MotorDriver* motor, WiFiManager* wifiMgr, ScheduleManager* schedMgr) {
+bool WebServer::begin(DosingHead** heads, uint8_t num, MotorDriver* motor, WiFiManager* wifiMgr, ScheduleManager* schedMgr, DosingLogManager* logMgr) {
     if (running) {
         return true;
     }
@@ -25,6 +28,7 @@ bool WebServer::begin(DosingHead** heads, uint8_t num, MotorDriver* motor, WiFiM
     motorDriver = motor;
     wifiManager = wifiMgr;
     scheduleManager = schedMgr;
+    logManager = logMgr;
 
     // Setup WebSocket
     ws->onEvent(onWebSocketEventStatic);
@@ -123,6 +127,19 @@ void WebServer::setupRoutes() {
     server->on("/api/schedules/2", HTTP_DELETE, [this](AsyncWebServerRequest* request) { this->handleDeleteSchedule(request); });
     server->on("/api/schedules/3", HTTP_DELETE, [this](AsyncWebServerRequest* request) { this->handleDeleteSchedule(request); });
 
+    // Dosing log endpoints
+    server->on("/api/logs/dashboard", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        this->handleGetDashboard(request);
+    });
+
+    server->on("/api/logs/hourly", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        this->handleGetHourlyLogs(request);
+    });
+
+    server->on("/api/logs", HTTP_DELETE, [this](AsyncWebServerRequest* request) {
+        this->handleDeleteLogs(request);
+    });
+
     // 404 handler
     server->onNotFound([](AsyncWebServerRequest* request) {
         request->send(404, "application/json", "{\"error\":\"Endpoint not found\"}");
@@ -192,15 +209,28 @@ void WebServer::handlePostDose(AsyncWebServerRequest* request, uint8_t* data, si
         uint8_t head;
         float volume;
         AsyncWebSocket* ws;
+        DosingLogManager* logManager;  // For logging ad-hoc doses
     };
 
-    DoseTaskParams* params = new DoseTaskParams{dosingHeads, head, volume, ws};
+    DoseTaskParams* params = new DoseTaskParams{dosingHeads, head, volume, ws, logManager};
 
     xTaskCreate([](void* param) {
         DoseTaskParams* p = (DoseTaskParams*)param;
 
         // Execute dose (blocking within this task)
         DosingResult result = p->heads[p->head]->dispense(p->volume);
+
+        // Log ad-hoc dose if successful and log manager available
+        if (result.success && p->logManager != nullptr) {
+            time_t now;
+            time(&now);
+            uint32_t timestamp = static_cast<uint32_t>(now);
+
+            // Only log if we have valid time (after year 2000)
+            if (timestamp >= 946684800) {
+                p->logManager->logAdhocDose(p->head, result.estimatedVolume, timestamp);
+            }
+        }
 
         // Broadcast result to WebSocket clients
         if (result.success) {
@@ -215,7 +245,7 @@ void WebServer::handlePostDose(AsyncWebServerRequest* request, uint8_t* data, si
             serializeJson(wsDoc, wsMessage);
             p->ws->textAll(wsMessage);
 
-            Serial.printf("[WebServer] Dose complete: Head %d, Volume %.2f mL, Runtime %lu ms\n",
+            Serial.printf("[WebServer] Ad-hoc dose complete: Head %d, Volume %.2f mL, Runtime %lu ms\n",
                          p->head, result.estimatedVolume, result.actualRuntime);
         } else {
             JsonDocument wsDoc;
@@ -505,10 +535,11 @@ void WebServer::handleGetAllSchedules(AsyncWebServerRequest* request) {
         JsonObject schedObj = schedulesArray.add<JsonObject>();
         schedObj["head"] = schedules[i].head;
         schedObj["name"] = schedules[i].name;
-        schedObj["type"] = static_cast<uint8_t>(schedules[i].type);
         schedObj["enabled"] = schedules[i].enabled;
+        schedObj["dailyTargetVolume"] = schedules[i].dailyTargetVolume;
+        schedObj["dosesPerDay"] = schedules[i].dosesPerDay;
         schedObj["volume"] = schedules[i].volume;
-        schedObj["timestamp"] = schedules[i].timestamp;
+        schedObj["intervalSeconds"] = schedules[i].intervalSeconds;
         schedObj["lastExecutionTime"] = schedules[i].lastExecutionTime;
         schedObj["executionCount"] = schedules[i].executionCount;
         schedObj["createdAt"] = schedules[i].createdAt;
@@ -550,10 +581,11 @@ void WebServer::handleGetSchedule(AsyncWebServerRequest* request) {
     JsonDocument doc;
     doc["head"] = sched.head;
     doc["name"] = sched.name;
-    doc["type"] = static_cast<uint8_t>(sched.type);
     doc["enabled"] = sched.enabled;
+    doc["dailyTargetVolume"] = sched.dailyTargetVolume;
+    doc["dosesPerDay"] = sched.dosesPerDay;
     doc["volume"] = sched.volume;
-    doc["timestamp"] = sched.timestamp;
+    doc["intervalSeconds"] = sched.intervalSeconds;
     doc["lastExecutionTime"] = sched.lastExecutionTime;
     doc["executionCount"] = sched.executionCount;
     doc["createdAt"] = sched.createdAt;
@@ -654,26 +686,26 @@ bool WebServer::validateScheduleRequest(const JsonDocument& doc, Schedule& sched
         return false;
     }
 
-    if (!doc["type"].is<uint8_t>()) {
-        error = "Missing required field: type";
+    if (!doc["dailyTargetVolume"].is<float>()) {
+        error = "Missing required field: dailyTargetVolume";
         return false;
     }
 
-    if (!doc["volume"].is<float>()) {
-        error = "Missing required field: volume";
-        return false;
-    }
-
-    if (!doc["timestamp"].is<uint32_t>()) {
-        error = "Missing required field: timestamp";
+    if (!doc["dosesPerDay"].is<uint16_t>()) {
+        error = "Missing required field: dosesPerDay";
         return false;
     }
 
     // Extract values
     sched.head = doc["head"];
-    sched.type = static_cast<ScheduleType>(doc["type"].as<uint8_t>());
-    sched.volume = doc["volume"];
-    sched.timestamp = doc["timestamp"];
+    sched.dailyTargetVolume = doc["dailyTargetVolume"];
+    sched.dosesPerDay = doc["dosesPerDay"].as<uint16_t>();
+
+    // Calculate volume and interval from user inputs
+    if (!sched.calculateFromDailyTarget()) {
+        error = "Failed to calculate schedule parameters from dailyTargetVolume and dosesPerDay";
+        return false;
+    }
 
     // Optional fields
     sched.enabled = doc["enabled"].is<bool>() ? doc["enabled"].as<bool>() : true;
@@ -689,42 +721,176 @@ bool WebServer::validateScheduleRequest(const JsonDocument& doc, Schedule& sched
     sched.lastExecutionTime = 0;
     sched.executionCount = 0;
 
-    // Validate values
+    // Validate head index
     if (sched.head >= NUM_SCHEDULE_HEADS) {
         error = "Invalid head index: " + String(sched.head) + " (must be 0-3)";
         return false;
     }
 
-    if (sched.volume <= 0.0f || sched.volume > 1000.0f) {
-        error = "Invalid volume: " + String(sched.volume) + " (must be 0.1-1000 mL)";
+    // Validate user inputs
+    if (sched.dailyTargetVolume <= 0.0f || sched.dailyTargetVolume > 10000.0f) {
+        error = "Daily target volume must be 0.1-10000 mL";
         return false;
     }
 
-    // Validate type-specific constraints
-    switch (sched.type) {
-        case ScheduleType::ONCE:
-            // timestamp should be a future Unix epoch time
-            break;
-        case ScheduleType::DAILY:
-            // timestamp should be seconds since midnight (0-86399)
-            if (sched.timestamp >= 86400) {
-                error = "Invalid DAILY timestamp: " + String(sched.timestamp) + " (must be 0-86399 seconds since midnight)";
-                return false;
-            }
-            break;
-        case ScheduleType::INTERVAL:
-            // timestamp should be interval in seconds (minimum 60 seconds)
-            if (sched.timestamp < 60) {
-                error = "Invalid INTERVAL timestamp: " + String(sched.timestamp) + " (must be >= 60 seconds)";
-                return false;
-            }
-            break;
-        default:
-            error = "Invalid schedule type: " + String(static_cast<uint8_t>(sched.type));
-            return false;
+    if (sched.dosesPerDay == 0 || sched.dosesPerDay > 1440) {
+        error = "Doses per day must be 1-1440 (max 1 per minute)";
+        return false;
+    }
+
+    // Validate calculated values
+    if (sched.volume <= 0.0f || sched.volume > 1000.0f) {
+        error = "Calculated volume per dose is invalid: " + String(sched.volume) + " mL";
+        return false;
+    }
+
+    if (sched.intervalSeconds < 60) {
+        error = "Calculated interval too short: " + String(sched.intervalSeconds) + " seconds (min 60)";
+        return false;
     }
 
     return true;
+}
+
+void WebServer::handleGetDashboard(AsyncWebServerRequest* request) {
+    if (logManager == nullptr || scheduleManager == nullptr) {
+        sendErrorResponse(request, 503, "Dosing log manager not available");
+        return;
+    }
+
+    // Get current time
+    time_t now;
+    time(&now);
+    uint32_t currentTime = static_cast<uint32_t>(now);
+
+    // Check if we have valid time
+    if (currentTime < 946684800) {  // Before year 2000
+        sendErrorResponse(request, 503, "Time not synchronized - NTP required");
+        return;
+    }
+
+    // Get all schedules
+    Schedule schedules[NUM_DOSING_HEADS];
+    for (uint8_t i = 0; i < NUM_DOSING_HEADS; i++) {
+        if (!scheduleManager->getSchedule(i, schedules[i])) {
+            // No schedule for this head - set defaults
+            schedules[i].head = i;
+            schedules[i].enabled = false;
+            schedules[i].dailyTargetVolume = 0.0f;
+            schedules[i].dosesPerDay = 0;
+            schedules[i].volume = 0.0f;
+        }
+    }
+
+    // Get all daily summaries
+    DailySummary summaries[NUM_DOSING_HEADS];
+    uint8_t count = logManager->getAllDailySummaries(currentTime, schedules, summaries);
+
+    // Build JSON response
+    JsonDocument doc;
+    JsonArray headsArray = doc["heads"].to<JsonArray>();
+
+    for (uint8_t i = 0; i < count; i++) {
+        JsonObject headObj = headsArray.add<JsonObject>();
+        headObj["head"] = summaries[i].head;
+        headObj["dailyTarget"] = summaries[i].dailyTarget;
+        headObj["scheduledActual"] = summaries[i].scheduledActual;
+        headObj["adhocTotal"] = summaries[i].adhocTotal;
+        headObj["dosesPerDay"] = summaries[i].dosesPerDay;
+        headObj["perDoseVolume"] = summaries[i].perDoseVolume;
+        headObj["totalToday"] = summaries[i].getTotalToday();
+        headObj["percentComplete"] = summaries[i].getPercentComplete();
+    }
+
+    doc["timestamp"] = currentTime;
+    doc["count"] = count;
+
+    sendJsonResponse(request, 200, doc);
+}
+
+void WebServer::handleGetHourlyLogs(AsyncWebServerRequest* request) {
+    if (logManager == nullptr) {
+        sendErrorResponse(request, 503, "Dosing log manager not available");
+        return;
+    }
+
+    // Get current time
+    time_t now;
+    time(&now);
+    uint32_t currentTime = static_cast<uint32_t>(now);
+
+    // Check if we have valid time
+    if (currentTime < 946684800) {  // Before year 2000
+        sendErrorResponse(request, 503, "Time not synchronized - NTP required");
+        return;
+    }
+
+    // Parse query parameters
+    uint32_t hours = 24;  // Default: last 24 hours
+    if (request->hasParam("hours")) {
+        hours = request->getParam("hours")->value().toInt();
+        if (hours == 0 || hours > 336) {  // Max 14 days (336 hours)
+            hours = 24;
+        }
+    }
+
+    // Calculate time range
+    uint32_t startTime = currentTime - (hours * 3600);
+    uint32_t endTime = currentTime;
+
+    // Override with explicit start/end if provided
+    if (request->hasParam("start")) {
+        startTime = request->getParam("start")->value().toInt();
+    }
+    if (request->hasParam("end")) {
+        endTime = request->getParam("end")->value().toInt();
+    }
+
+    // Get hourly logs
+    HourlyDoseLog logs[336];  // Max 14 days × 24 hours
+    uint16_t count = logManager->getHourlyLogs(startTime, endTime, logs, 336);
+
+    // Build JSON response
+    JsonDocument doc;
+    JsonArray logsArray = doc["logs"].to<JsonArray>();
+
+    for (uint16_t i = 0; i < count; i++) {
+        JsonObject logObj = logsArray.add<JsonObject>();
+        logObj["hourTimestamp"] = logs[i].hourTimestamp;
+        logObj["head"] = logs[i].head;
+        logObj["scheduledVolume"] = logs[i].scheduledVolume;
+        logObj["adhocVolume"] = logs[i].adhocVolume;
+        logObj["totalVolume"] = logs[i].getTotalVolume();
+    }
+
+    doc["count"] = count;
+    doc["startTime"] = startTime;
+    doc["endTime"] = endTime;
+
+    sendJsonResponse(request, 200, doc);
+}
+
+void WebServer::handleDeleteLogs(AsyncWebServerRequest* request) {
+    if (logManager == nullptr) {
+        sendErrorResponse(request, 503, "Dosing log manager not available");
+        return;
+    }
+
+    // Clear all logs
+    bool success = logManager->clearAll();
+
+    JsonDocument doc;
+    doc["success"] = success;
+
+    if (success) {
+        doc["message"] = "All dosing logs cleared successfully";
+        Serial.println("[WebServer] All dosing logs cleared");
+    } else {
+        doc["error"] = "Failed to clear dosing logs";
+        Serial.println("[WebServer] Failed to clear dosing logs");
+    }
+
+    sendJsonResponse(request, success ? 200 : 500, doc);
 }
 
 void WebServer::onWebSocketEventStatic(AsyncWebSocket* server, AsyncWebSocketClient* client,
