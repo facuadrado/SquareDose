@@ -1,6 +1,7 @@
 #include "network/WebServer.h"
 #include "logs/DosingLogManager.h"
 #include <time.h>
+#include <sys/time.h>
 
 // Static instance pointer for WebSocket callback
 static WebServer* serverInstance = nullptr;
@@ -139,6 +140,17 @@ void WebServer::setupRoutes() {
     server->on("/api/logs", HTTP_DELETE, [this](AsyncWebServerRequest* request) {
         this->handleDeleteLogs(request);
     });
+
+    // Time sync endpoints
+    server->on("/api/time", HTTP_GET, [this](AsyncWebServerRequest* request) {
+        this->handleGetTime(request);
+    });
+
+    server->on("/api/time", HTTP_POST, [](AsyncWebServerRequest* request) {},
+              nullptr,
+              [this](AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
+                  this->handlePostTime(request, data, len, index, total);
+              });
 
     // 404 handler
     server->onNotFound([](AsyncWebServerRequest* request) {
@@ -891,6 +903,59 @@ void WebServer::handleDeleteLogs(AsyncWebServerRequest* request) {
     }
 
     sendJsonResponse(request, success ? 200 : 500, doc);
+}
+
+void WebServer::handleGetTime(AsyncWebServerRequest* request) {
+    time_t now;
+    time(&now);
+
+    JsonDocument doc;
+    doc["timestamp"] = (uint32_t)now;
+    doc["synced"] = (now >= 1577836800);  // After Jan 1, 2020
+    doc["source"] = (now >= 1577836800) ? "NTP or Manual" : "Unsynced";
+
+    sendJsonResponse(request, 200, doc);
+}
+
+void WebServer::handlePostTime(AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total) {
+    // Parse JSON from request body
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, data, len);
+
+    if (error) {
+        sendErrorResponse(request, 400, "Invalid JSON: " + String(error.c_str()));
+        return;
+    }
+
+    // Validate required field: timestamp
+    if (!doc["timestamp"].is<uint32_t>()) {
+        sendErrorResponse(request, 400, "Missing required field: timestamp");
+        return;
+    }
+
+    uint32_t timestamp = doc["timestamp"];
+
+    // Validate timestamp is reasonable (after year 2020, before year 2100)
+    if (timestamp < 1577836800 || timestamp > 4102444800) {
+        sendErrorResponse(request, 400, "Invalid timestamp: must be between 2020 and 2100");
+        return;
+    }
+
+    // Set system time using settimeofday
+    struct timeval tv;
+    tv.tv_sec = timestamp;
+    tv.tv_usec = 0;
+    settimeofday(&tv, nullptr);
+
+    Serial.printf("[WebServer] Manual time sync: %lu\n", timestamp);
+
+    // Return success
+    JsonDocument responseDoc;
+    responseDoc["success"] = true;
+    responseDoc["timestamp"] = timestamp;
+    responseDoc["message"] = "Time synchronized successfully";
+
+    sendJsonResponse(request, 200, responseDoc);
 }
 
 void WebServer::onWebSocketEventStatic(AsyncWebSocket* server, AsyncWebSocketClient* client,

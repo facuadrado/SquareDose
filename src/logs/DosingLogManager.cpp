@@ -57,6 +57,13 @@ bool DosingLogManager::logDoseInternal(uint8_t head, float scheduledVolume, floa
         return false;
     }
 
+    // Skip logging if time is invalid (before year 2020)
+    // This allows schedules to work without NTP, but logs only when time is valid
+    if (timestamp < 1577836800) {  // Jan 1, 2020
+        Serial.println("[DosingLogManager] Skipping log - time not synced (NTP or manual sync required)");
+        return false;  // Not an error, just skipping
+    }
+
     // Round timestamp to hour
     uint32_t hourTimestamp = roundToHour(timestamp);
 

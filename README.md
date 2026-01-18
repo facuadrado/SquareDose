@@ -74,47 +74,40 @@ SquareDose/
 ├── platformio.ini                      # Build configuration
 ├── include/
 │   ├── config/
-│   │   ├── Config.h                    # System-wide configuration constants
 │   │   ├── HardwareConfig.h            # Pin definitions, hardware specs
 │   │   └── NetworkConfig.h             # WiFi/MQTT default configs
-│   ├── core/
-│   │   ├── SystemState.h               # Global system state management
-│   │   ├── TaskManager.h               # FreeRTOS task orchestration
-│   │   └── ErrorHandler.h              # Centralized error handling
 │   ├── hal/                            # Hardware Abstraction Layer
 │   │   ├── MotorDriver.h               # TB6612 driver abstraction
-│   │   ├── DosingHead.h                # Individual doser control
-│   │   └── GPIOManager.h               # GPIO initialization & control
-│   ├── storage/
-│   │   ├── NVSManager.h                # Non-Volatile Storage wrapper
-│   │   ├── ScheduleStore.h             # Schedule persistence
-│   │   ├── CalibrationStore.h          # Calibration data
-│   │   ├── CredentialStore.h           # Encrypted credentials
-│   │   └── LogStore.h                  # Circular log buffer
+│   │   └── DosingHead.h                # Individual doser control with calibration
 │   ├── network/
-│   │   ├── WiFiManager.h               # WiFi mode management
-│   │   ├── MQTTClient.h                # AWS IoT MQTT client
-│   │   ├── WebServer.h                 # Local REST/WebSocket server
-│   │   └── OTAManager.h                # Over-the-air updates
-│   ├── dosing/
-│   │   ├── DosingController.h          # High-level dosing orchestration
+│   │   ├── wifi_manager.h              # WiFi mode management (AP/STA switching)
+│   │   └── WebServer.h                 # Local REST/WebSocket server
+│   ├── scheduling/
 │   │   ├── Schedule.h                  # Schedule data structures
-│   │   ├── DosingEngine.h              # Execution engine for schedules
-│   │   └── Calibration.h               # Calibration algorithms
-│   ├── api/
-│   │   ├── CommandHandler.h            # Command processing (MQTT/REST)
-│   │   ├── MessageBuilder.h            # Response/status message builder
-│   │   └── RequestValidator.h          # Input validation & sanitization
-│   └── utils/
-│       ├── Logger.h                    # Multi-level logging system
-│       ├── TimeManager.h               # NTP/RTC time synchronization
-│       └── CryptoUtils.h               # Encryption helpers
-├── src/                                # Implementation files (mirrors include/)
-├── lib/                                # Custom libraries
-├── test/                               # Unit and integration tests
-└── data/                               # SPIFFS/LittleFS data
-    ├── web/                            # Web UI files
-    └── certs/                          # AWS IoT certificates
+│   │   ├── ScheduleManager.h           # Thread-safe schedule CRUD operations
+│   │   ├── ScheduleStore.h             # NVS persistence for schedules
+│   │   └── SchedulerTask.h             # FreeRTOS task for schedule execution
+│   └── logs/
+│       ├── DosingLog.h                 # Log data structures (hourly aggregation)
+│       ├── DosingLogManager.h          # Thread-safe log management
+│       └── DosingLogStore.h            # NVS persistence for dosing logs
+└── src/                                # Implementation files (mirrors include/)
+    ├── hal/
+    │   ├── MotorDriver.cpp
+    │   └── DosingHead.cpp
+    ├── network/
+    │   ├── wifi_manager.cpp
+    │   └── WebServer.cpp
+    ├── scheduling/
+    │   ├── Schedule.cpp
+    │   ├── ScheduleManager.cpp
+    │   ├── ScheduleStore.cpp
+    │   └── SchedulerTask.cpp
+    ├── logs/
+    │   ├── DosingLog.cpp
+    │   ├── DosingLogManager.cpp
+    │   └── DosingLogStore.cpp
+    └── main.cpp                        # Application entry point
 ```
 
 ## Implementation Phases
@@ -419,25 +412,79 @@ The WebServer is accessible at:
 - **AP Mode**: 192.168.4.1 (when in setup/fallback mode)
 - **STA Mode**: Local network IP assigned by DHCP (shown in `/api/wifi/status`)
 
+#### System & Status
 ```
-GET    /api/status              - System status (mode, connectivity, uptime, etc.)
-GET    /api/schedules           - List all schedules
-POST   /api/schedules           - Create new schedule
-PUT    /api/schedules/:id       - Update schedule
-DELETE /api/schedules/:id       - Delete schedule
-POST   /api/dose                - Ad-hoc dosing {head, volume_ml}
-POST   /api/dose/multi          - Multi-head dosing {heads[], volumes[]}
-POST   /api/calibrate           - Start calibration {head, target_volume_ml, duration_ms}
-GET    /api/calibration         - Get calibration data
-GET    /api/logs                - Retrieve logs (paginated)
+GET    /api/status              - System status (motors, heads, WiFi, uptime)
+GET    /api/calibration         - Get calibration data for all heads
+```
 
-WiFi Management Endpoints:
-POST   /api/wifi/configure      - Set WiFi credentials and switch to STA {ssid, password}
-GET    /api/wifi/status         - Current mode (AP/STA), connection status, IP addresses
-POST   /api/wifi/reset          - Clear credentials and return to AP mode
-
-Other:
+#### Dosing Operations
+```
+POST   /api/dose                - Ad-hoc dosing {head: 0-3, volume: float}
+POST   /api/calibrate           - Calibrate dosing head {head: 0-3, actualVolume: float}
 POST   /api/emergency-stop      - Emergency stop all pumps
+```
+
+#### Schedule Management
+```
+GET    /api/schedules           - List all schedules (returns array of schedules)
+GET    /api/schedules/{head}    - Get schedule for specific head (0-3)
+POST   /api/schedules           - Create/update schedule {head, name, enabled, dailyTargetVolume, dosesPerDay}
+DELETE /api/schedules/{head}    - Delete schedule for specific head (0-3)
+```
+
+**Schedule Request Example:**
+```json
+{
+  "head": 0,
+  "name": "Head 0 - Nutrient A",
+  "enabled": true,
+  "dailyTargetVolume": 2880,
+  "dosesPerDay": 1440
+}
+```
+The system auto-calculates `volume` (mL per dose) and `intervalSeconds` based on daily target and doses per day.
+
+#### Dosing Logs & Analytics
+```
+GET    /api/logs/dashboard      - Daily summary for all heads (scheduled, adhoc, targets)
+GET    /api/logs/hourly         - Hourly logs with query params: start, end, limit
+DELETE /api/logs                - Clear all dosing logs
+```
+
+**Dashboard Response Example:**
+```json
+{
+  "summaries": [
+    {
+      "head": 0,
+      "dailyTarget": 2880.0,
+      "scheduledActual": 156.5,
+      "adhocTotal": 12.3,
+      "dosesPerDay": 1440,
+      "perDoseVolume": 2.0
+    }
+  ],
+  "count": 4
+}
+```
+
+#### Time Synchronization
+```
+GET    /api/time                - Get current device time and sync status
+POST   /api/time                - Set time manually {timestamp: unix_epoch}
+```
+
+**Notes:**
+- Logging only works when time is synced (NTP or manual)
+- Schedules work without time sync using millis() fallback
+- Manual time sync required in AP mode (no NTP without internet)
+
+#### WiFi Management
+```
+GET    /api/wifi/status         - Current mode (AP/STA), connection status, IP addresses
+POST   /api/wifi/configure      - Set WiFi credentials {ssid, password} and switch to STA
+POST   /api/wifi/reset          - Clear credentials and return to AP mode
 ```
 
 ### MQTT Topics (Cloud Access - STA Mode Only)

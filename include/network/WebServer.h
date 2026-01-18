@@ -96,6 +96,10 @@ private:
     void handleGetHourlyLogs(AsyncWebServerRequest* request);
     void handleDeleteLogs(AsyncWebServerRequest* request);
 
+    // Time Sync API Handlers
+    void handleGetTime(AsyncWebServerRequest* request);
+    void handlePostTime(AsyncWebServerRequest* request, uint8_t* data, size_t len, size_t index, size_t total);
+
     // WebSocket Handlers
     void handleWebSocketEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
                              AwsEventType type, void* arg, uint8_t* data, size_t len);
