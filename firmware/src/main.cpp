@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "network/wifi_manager.h"
 #include "network/WebServer.h"
+#include "network/BLEServer.h"
 #include "hal/MotorDriver.h"
 #include "hal/DosingHead.h"
 #include "scheduling/ScheduleManager.h"
@@ -141,29 +142,31 @@ void setup() {
     Serial.println("[Main] ERROR: Web Server initialization failed!");
   }
 
+  // Initialize BLE Server
+  Serial.println("[Main] Initializing BLE Server...");
+  if (squareDoseBLE.begin(dosingHeads, 4, &motorDriver, &wifiManager, &scheduleManager, &dosingLogManager)) {
+    Serial.println("[Main] BLE Server started successfully");
+    Serial.println("[Main] BLE Name: " + wifiManager.getAPSSID());
+  } else {
+    Serial.println("[Main] ERROR: BLE Server initialization failed!");
+  }
+
   Serial.println("[Main] Setup complete");
   Serial.println();
   Serial.println("========================================");
-  Serial.println("  REST API Endpoints:");
-  Serial.println("  GET  /api/status");
-  Serial.println("  GET  /api/calibration");
-  Serial.println("  GET  /api/wifi/status");
-  Serial.println("  POST /api/dose");
-  Serial.println("  POST /api/calibrate");
-  Serial.println("  POST /api/emergency-stop");
-  Serial.println("  POST /api/wifi/configure");
-  Serial.println("  POST /api/wifi/reset");
-  Serial.println("  GET  /api/schedules");
-  Serial.println("  GET  /api/schedules/{head}");
-  Serial.println("  POST /api/schedules");
-  Serial.println("  DELETE /api/schedules/{head}");
-  Serial.println("  GET  /api/logs/dashboard");
-  Serial.println("  GET  /api/logs/hourly");
-  Serial.println("  DELETE /api/logs");
-  Serial.println("  GET  /api/time");
-  Serial.println("  POST /api/time");
+  Serial.println("  BLE Commands (JSON via Nordic UART):");
+  Serial.println("  {\"cmd\":\"status\"}");
+  Serial.println("  {\"cmd\":\"dose\",\"head\":0,\"volume\":5.0}");
+  Serial.println("  {\"cmd\":\"calibrate\",\"head\":0,\"actualVolume\":8.5}");
+  Serial.println("  {\"cmd\":\"emergency_stop\"}");
+  Serial.println("  {\"cmd\":\"wifi_configure\",\"ssid\":\"...\",\"password\":\"...\"}");
+  Serial.println("  {\"cmd\":\"schedules_get\"}");
+  Serial.println("  {\"cmd\":\"schedule_set\",\"head\":0,...}");
+  Serial.println("========================================");
+  Serial.println("  REST API also available on WiFi");
   Serial.println("========================================");
 }
+
 
 void loop() {
   // Main loop - all work is handled by FreeRTOS tasks

@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <ESPmDNS.h>
 #include <Preferences.h>
 #include "config/NetworkConfig.h"
 

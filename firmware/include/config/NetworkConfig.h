@@ -22,6 +22,10 @@
 #define NVS_SSID_KEY "ssid"
 #define NVS_PASSWORD_KEY "password"
 
+// mDNS Configuration
+#define MDNS_HOSTNAME "squaredose"  // Access via http://squaredose.local
+#define MDNS_SERVICE_TYPE "squaredose"  // Service type for discovery: _squaredose._tcp
+
 // FreeRTOS Task Configuration
 #define WIFI_TASK_STACK_SIZE 5000
 #define WIFI_TASK_PRIORITY 1

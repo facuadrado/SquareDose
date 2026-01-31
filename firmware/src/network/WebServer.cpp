@@ -31,6 +31,11 @@ bool WebServer::begin(DosingHead** heads, uint8_t num, MotorDriver* motor, WiFiM
     scheduleManager = schedMgr;
     logManager = logMgr;
 
+    // Setup CORS headers for all responses
+    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Origin", "*");
+    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
     // Setup WebSocket
     ws->onEvent(onWebSocketEventStatic);
     server->addHandler(ws);
@@ -152,9 +157,13 @@ void WebServer::setupRoutes() {
                   this->handlePostTime(request, data, len, index, total);
               });
 
-    // 404 handler
+    // Handle CORS preflight requests (OPTIONS)
     server->onNotFound([](AsyncWebServerRequest* request) {
-        request->send(404, "application/json", "{\"error\":\"Endpoint not found\"}");
+        if (request->method() == HTTP_OPTIONS) {
+            request->send(204);  // No Content - just headers
+        } else {
+            request->send(404, "application/json", "{\"error\":\"Endpoint not found\"}");
+        }
     });
 }
 

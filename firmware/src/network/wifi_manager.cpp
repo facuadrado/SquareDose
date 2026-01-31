@@ -394,6 +394,16 @@ bool WiFiManager::connectToSTA() {
     }
 
     Serial.println("[WiFiManager] Connected to STA - IP: " + WiFi.localIP().toString());
+
+    // Start mDNS for hostname resolution and service discovery
+    if (MDNS.begin(MDNS_HOSTNAME)) {
+        MDNS.addService("http", "tcp", 80);
+        MDNS.addService(MDNS_SERVICE_TYPE, "tcp", 80);
+        Serial.println("[WiFiManager] mDNS started: " + String(MDNS_HOSTNAME) + ".local");
+    } else {
+        Serial.println("[WiFiManager] mDNS failed to start");
+    }
+
     return true;
 }
 
@@ -412,10 +422,23 @@ bool WiFiManager::startAPMode() {
 
     Serial.println("[WiFiManager] AP started - SSID: " + apSSID);
     Serial.println("[WiFiManager] AP IP: " + WiFi.softAPIP().toString());
+
+    // Start mDNS for AP mode (hostname resolution and service discovery)
+    if (MDNS.begin(MDNS_HOSTNAME)) {
+        MDNS.addService("http", "tcp", 80);
+        MDNS.addService(MDNS_SERVICE_TYPE, "tcp", 80);
+        Serial.println("[WiFiManager] mDNS started: " + String(MDNS_HOSTNAME) + ".local");
+    } else {
+        Serial.println("[WiFiManager] mDNS failed to start");
+    }
+
     return true;
 }
 
 void WiFiManager::stopCurrentMode() {
+    // Stop mDNS before changing modes
+    MDNS.end();
+
     if (currentMode == WIFIMANAGER_MODE_STA) {
         WiFi.disconnect(true);
         Serial.println("[WiFiManager] STA mode stopped");
