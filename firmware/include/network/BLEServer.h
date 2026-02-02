@@ -7,6 +7,10 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 #include <ArduinoJson.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "config/BLEConfig.h"
 #include "hal/DosingHead.h"
 #include "hal/MotorDriver.h"
@@ -16,19 +20,32 @@
 // Forward declaration
 class DosingLogManager;
 
+// Command queue message structure
+struct BLECommand {
+    char data[512];  // Command JSON string (max 512 bytes)
+    uint16_t length;
+};
+
+// Stack sizes for tasks
+static const uint32_t BLE_WORKER_STACK_SIZE = 16384;  // 16KB for command processing (NVS needs lots of stack)
+static const uint32_t BLE_SEND_STACK_SIZE = 8192;     // 8KB for BLE notify operations
+
 /**
  * @brief BLE Server for SquareDose device
  *
  * Implements Nordic UART Service (NUS) pattern for bidirectional JSON commands.
  * Commands mirror REST API structure for consistency.
  *
+ * THREADING MODEL:
+ * - BLE callbacks (onWrite, onConnect, onDisconnect) run on BLE stack task (limited stack)
+ * - Commands are queued and processed by dedicated worker task (16KB stack)
+ * - Responses are sent by dedicated send task (8KB stack)
+ * - Shared state protected by mutex
+ *
  * Command Format:
  *   Request:  {"cmd":"status"}
  *   Response: {"cmd":"status","success":true,"data":{...}}
  *   Event:    {"event":"dose_complete","head":0,"volume":5.0}
- *
- * Thread-safety: BLE callbacks run on Bluetooth task.
- * Long operations (dose) spawn separate FreeRTOS tasks.
  */
 class SquareDoseBLEServer : public BLEServerCallbacks,
                              public BLECharacteristicCallbacks {
@@ -51,9 +68,9 @@ public:
     void stop();
 
     /**
-     * @brief Check if a client is connected
+     * @brief Check if a client is connected (thread-safe)
      */
-    bool isConnected() const;
+    bool isConnected();
 
     /**
      * @brief Check if server is running
@@ -61,7 +78,7 @@ public:
     bool isRunning() const;
 
     /**
-     * @brief Send response/event to connected client
+     * @brief Send response/event to connected client (thread-safe)
      * @param message JSON string to send
      */
     void sendResponse(const String& message);
@@ -95,15 +112,22 @@ private:
     ScheduleManager* scheduleManager;
     DosingLogManager* logManager;
 
-    // State
-    SemaphoreHandle_t txMutex;
-    bool deviceConnected;
-    bool running;
+    // Synchronization primitives
+    SemaphoreHandle_t stateMutex;    // Protects deviceConnected, rxBuffer
+    SemaphoreHandle_t txMutex;       // Protects TX operations
+    QueueHandle_t commandQueue;      // Queue for incoming commands
+    TaskHandle_t workerTaskHandle;   // Handle to worker task
 
-    // RX buffer for multi-packet messages
+    // State (protected by stateMutex)
+    volatile bool deviceConnected;
+    bool running;
     String rxBuffer;
 
-    // Command processing
+    // Worker task function (static for FreeRTOS)
+    static void workerTask(void* param);
+    void processCommandQueue();
+
+    // Command processing (runs in worker task context)
     void processCommand(const String& command);
     void handleCommand(const JsonDocument& doc);
 
@@ -130,6 +154,10 @@ private:
     void sendError(const String& cmd, const String& message);
     void sendSuccess(const String& cmd, const JsonDocument& data);
     String getDeviceName();
+
+    // Thread-safe state access
+    bool getDeviceConnected();
+    void setDeviceConnected(bool connected);
 };
 
 // Global instance

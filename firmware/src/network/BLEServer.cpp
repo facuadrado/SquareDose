@@ -6,19 +6,41 @@
 // Global instance
 SquareDoseBLEServer squareDoseBLE;
 
+// Queue size for pending commands
+static const uint8_t COMMAND_QUEUE_SIZE = 4;
+
+// Mutex timeout in milliseconds
+static const uint32_t MUTEX_TIMEOUT_MS = 5000;
+
 SquareDoseBLEServer::SquareDoseBLEServer()
     : bleServer(nullptr), bleService(nullptr),
       txCharacteristic(nullptr), rxCharacteristic(nullptr),
       advertising(nullptr), dosingHeads(nullptr), numHeads(0),
       motorDriver(nullptr), wifiManager(nullptr),
       scheduleManager(nullptr), logManager(nullptr),
-      txMutex(nullptr), deviceConnected(false), running(false) {
+      stateMutex(nullptr), txMutex(nullptr),
+      commandQueue(nullptr), workerTaskHandle(nullptr),
+      deviceConnected(false), running(false) {
 }
 
 SquareDoseBLEServer::~SquareDoseBLEServer() {
     stop();
+
+    if (workerTaskHandle != nullptr) {
+        vTaskDelete(workerTaskHandle);
+        workerTaskHandle = nullptr;
+    }
+    if (commandQueue != nullptr) {
+        vQueueDelete(commandQueue);
+        commandQueue = nullptr;
+    }
     if (txMutex != nullptr) {
         vSemaphoreDelete(txMutex);
+        txMutex = nullptr;
+    }
+    if (stateMutex != nullptr) {
+        vSemaphoreDelete(stateMutex);
+        stateMutex = nullptr;
     }
 }
 
@@ -41,10 +63,50 @@ bool SquareDoseBLEServer::begin(DosingHead** heads, uint8_t num,
     scheduleManager = schedMgr;
     logManager = logMgr;
 
-    // Create mutex for TX operations
+    // Create synchronization primitives
+    stateMutex = xSemaphoreCreateMutex();
+    if (stateMutex == nullptr) {
+        Serial.println("[BLE] Failed to create state mutex");
+        return false;
+    }
+
     txMutex = xSemaphoreCreateMutex();
     if (txMutex == nullptr) {
-        Serial.println("[BLE] Failed to create mutex");
+        Serial.println("[BLE] Failed to create TX mutex");
+        vSemaphoreDelete(stateMutex);
+        stateMutex = nullptr;
+        return false;
+    }
+
+    // Create command queue
+    commandQueue = xQueueCreate(COMMAND_QUEUE_SIZE, sizeof(BLECommand));
+    if (commandQueue == nullptr) {
+        Serial.println("[BLE] Failed to create command queue");
+        vSemaphoreDelete(txMutex);
+        vSemaphoreDelete(stateMutex);
+        txMutex = nullptr;
+        stateMutex = nullptr;
+        return false;
+    }
+
+    // Create worker task with large stack for NVS operations
+    BaseType_t result = xTaskCreate(
+        workerTask,
+        "BLEWorker",
+        BLE_WORKER_STACK_SIZE,
+        this,
+        2,  // Higher priority than idle
+        &workerTaskHandle
+    );
+
+    if (result != pdPASS) {
+        Serial.println("[BLE] Failed to create worker task");
+        vQueueDelete(commandQueue);
+        vSemaphoreDelete(txMutex);
+        vSemaphoreDelete(stateMutex);
+        commandQueue = nullptr;
+        txMutex = nullptr;
+        stateMutex = nullptr;
         return false;
     }
 
@@ -100,12 +162,32 @@ void SquareDoseBLEServer::stop() {
     }
 
     running = false;
-    deviceConnected = false;
+    setDeviceConnected(false);
     Serial.println("[BLE] Server stopped");
 }
 
-bool SquareDoseBLEServer::isConnected() const {
-    return deviceConnected;
+// Thread-safe accessors for deviceConnected
+bool SquareDoseBLEServer::getDeviceConnected() {
+    bool connected = false;
+    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) == pdTRUE) {
+        connected = deviceConnected;
+        xSemaphoreGive(stateMutex);
+    }
+    return connected;
+}
+
+void SquareDoseBLEServer::setDeviceConnected(bool connected) {
+    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) == pdTRUE) {
+        deviceConnected = connected;
+        if (!connected) {
+            rxBuffer = "";  // Clear buffer on disconnect
+        }
+        xSemaphoreGive(stateMutex);
+    }
+}
+
+bool SquareDoseBLEServer::isConnected() {
+    return getDeviceConnected();
 }
 
 bool SquareDoseBLEServer::isRunning() const {
@@ -113,55 +195,59 @@ bool SquareDoseBLEServer::isRunning() const {
 }
 
 void SquareDoseBLEServer::sendResponse(const String& message) {
-    if (!deviceConnected || txCharacteristic == nullptr) return;
+    if (!getDeviceConnected() || txCharacteristic == nullptr) return;
 
     // Copy message for the task (will be deleted by task)
     String* msgCopy = new String(message);
+    if (msgCopy == nullptr) return;
 
-    // Create a task with adequate stack to handle the BLE notify call
-    // The BLE library's notify() uses hexDump which needs ~4KB stack
+    // Create task parameters
     struct SendParams {
         SquareDoseBLEServer* server;
         String* message;
     };
 
     SendParams* params = new SendParams{this, msgCopy};
+    if (params == nullptr) {
+        delete msgCopy;
+        return;
+    }
 
-    xTaskCreate([](void* param) {
+    // Create send task with adequate stack
+    BaseType_t result = xTaskCreate([](void* param) {
         SendParams* p = (SendParams*)param;
         SquareDoseBLEServer* server = p->server;
         String* msg = p->message;
 
-        Serial.printf("[BLE] Sending response: %d bytes\n", msg->length());
-
-        if (xSemaphoreTake(server->txMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        if (xSemaphoreTake(server->txMutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) == pdTRUE) {
             // Send in chunks - use 20 bytes (default MTU payload size)
-            // MTU negotiation often doesn't happen, so use safe default
             size_t offset = 0;
             const size_t chunkSize = 20;
-            int chunkNum = 0;
 
-            while (offset < msg->length() && server->deviceConnected) {
+            while (offset < msg->length() && server->getDeviceConnected()) {
                 size_t len = min(chunkSize, msg->length() - offset);
                 server->txCharacteristic->setValue((uint8_t*)(msg->c_str() + offset), len);
                 server->txCharacteristic->notify();
                 offset += len;
-                chunkNum++;
 
                 // Delay between chunks to allow BLE stack to process
                 vTaskDelay(pdMS_TO_TICKS(30));
             }
 
-            Serial.printf("[BLE] Sent %d chunks, connected=%d\n", chunkNum, server->deviceConnected);
             xSemaphoreGive(server->txMutex);
-        } else {
-            Serial.println("[BLE] Failed to acquire TX mutex");
         }
 
         delete msg;
         delete p;
         vTaskDelete(NULL);
-    }, "BLESend", 8192, params, 1, NULL);  // 8KB stack for BLE operations
+    }, "BLESend", BLE_SEND_STACK_SIZE, params, 1, NULL);
+
+    // Clean up if task creation failed
+    if (result != pdPASS) {
+        delete msgCopy;
+        delete params;
+        Serial.println("[BLE] Failed to create send task");
+    }
 }
 
 void SquareDoseBLEServer::sendEvent(const String& eventType, const JsonDocument& data) {
@@ -179,57 +265,127 @@ void SquareDoseBLEServer::sendEvent(const String& eventType, const JsonDocument&
 }
 
 void SquareDoseBLEServer::onConnect(BLEServer* pServer) {
-    deviceConnected = true;
+    setDeviceConnected(true);
     Serial.println("[BLE] Client connected");
 
-    // Send connected event
+    // Send connected event (spawns send task, so safe in callback)
     JsonDocument eventDoc;
     eventDoc["event"] = "connected";
     eventDoc["device"] = getDeviceName();
 
     String eventStr;
     serializeJson(eventDoc, eventStr);
-
-    // Delay to allow connection to stabilize
-    vTaskDelay(pdMS_TO_TICKS(100));
     sendResponse(eventStr);
 }
 
 void SquareDoseBLEServer::onDisconnect(BLEServer* pServer) {
-    deviceConnected = false;
-    rxBuffer = "";
+    setDeviceConnected(false);
     Serial.println("[BLE] Client disconnected");
 
-    // Restart advertising
-    vTaskDelay(pdMS_TO_TICKS(500));
-    BLEDevice::startAdvertising();
-    Serial.println("[BLE] Advertising restarted");
+    // Restart advertising in background task to avoid blocking
+    xTaskCreate([](void* param) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+        BLEDevice::startAdvertising();
+        Serial.println("[BLE] Advertising restarted");
+        vTaskDelete(NULL);
+    }, "BLEAdv", 2048, nullptr, 1, NULL);
 }
 
 void SquareDoseBLEServer::onWrite(BLECharacteristic* pCharacteristic) {
+    // This runs on BLE stack task - keep it minimal!
     if (pCharacteristic != rxCharacteristic) return;
 
     String value = pCharacteristic->getValue().c_str();
     if (value.length() == 0) return;
 
+    // Protect rxBuffer access
+    if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        // Timeout - drop the data rather than blocking BLE task
+        Serial.println("[BLE] Warning: mutex timeout in onWrite");
+        return;
+    }
+
     rxBuffer += value;
 
-    // Try to parse as complete JSON
-    JsonDocument doc;
-    DeserializationError error = deserializeJson(doc, rxBuffer);
+    // Check if we have complete JSON (look for closing brace at same nesting level)
+    // Simple check: try to find balanced braces
+    int braceCount = 0;
+    bool inString = false;
+    bool hasContent = false;
+    int completeEnd = -1;
 
-    if (!error) {
-        // Valid JSON received
-        String command = rxBuffer;
-        rxBuffer = "";
-        processCommand(command);
-    } else if (error != DeserializationError::IncompleteInput) {
-        // Invalid JSON - clear buffer and send error
-        Serial.println("[BLE] Invalid JSON: " + rxBuffer);
-        rxBuffer = "";
-        sendError("unknown", "Invalid JSON format");
+    for (size_t i = 0; i < rxBuffer.length(); i++) {
+        char c = rxBuffer[i];
+        if (c == '"' && (i == 0 || rxBuffer[i-1] != '\\')) {
+            inString = !inString;
+        }
+        if (!inString) {
+            if (c == '{') {
+                braceCount++;
+                hasContent = true;
+            } else if (c == '}') {
+                braceCount--;
+                if (braceCount == 0 && hasContent) {
+                    completeEnd = i;
+                    break;
+                }
+            }
+        }
     }
-    // IncompleteInput means we're waiting for more data
+
+    if (completeEnd >= 0) {
+        // Extract complete JSON command
+        String command = rxBuffer.substring(0, completeEnd + 1);
+        rxBuffer = rxBuffer.substring(completeEnd + 1);
+
+        xSemaphoreGive(stateMutex);
+
+        // Queue command for worker task (non-blocking)
+        BLECommand cmd;
+        size_t len = min(command.length(), sizeof(cmd.data) - 1);
+        memcpy(cmd.data, command.c_str(), len);
+        cmd.data[len] = '\0';
+        cmd.length = len;
+
+        if (xQueueSend(commandQueue, &cmd, 0) != pdTRUE) {
+            // Queue full - send error response
+            Serial.println("[BLE] Command queue full");
+            sendError("unknown", "Server busy");
+        }
+    } else {
+        xSemaphoreGive(stateMutex);
+
+        // Check for buffer overflow
+        if (rxBuffer.length() > 1024) {
+            if (xSemaphoreTake(stateMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                rxBuffer = "";
+                xSemaphoreGive(stateMutex);
+            }
+            sendError("unknown", "Message too large");
+        }
+    }
+}
+
+// Worker task - runs with large stack, processes commands from queue
+void SquareDoseBLEServer::workerTask(void* param) {
+    SquareDoseBLEServer* server = (SquareDoseBLEServer*)param;
+    server->processCommandQueue();
+}
+
+void SquareDoseBLEServer::processCommandQueue() {
+    BLECommand cmd;
+
+    while (true) {
+        // Wait for command with timeout
+        if (xQueueReceive(commandQueue, &cmd, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            // Process command in worker task context (large stack available)
+            String command(cmd.data);
+            processCommand(command);
+        }
+
+        // Yield to other tasks
+        taskYIELD();
+    }
 }
 
 void SquareDoseBLEServer::processCommand(const String& command) {
@@ -311,7 +467,7 @@ void SquareDoseBLEServer::handleStatus(JsonDocument& response) {
     data["wifiConnected"] = wifiManager->isConnected();
     data["ipAddress"] = wifiManager->getLocalIP();
     data["apSSID"] = wifiManager->getAPSSID();
-    data["bleConnected"] = deviceConnected;
+    data["bleConnected"] = getDeviceConnected();
 
     JsonArray heads = data["dosingHeads"].to<JsonArray>();
     for (uint8_t i = 0; i < numHeads; i++) {
@@ -364,7 +520,7 @@ void SquareDoseBLEServer::handleDose(const JsonDocument& request, JsonDocument& 
 
     DoseParams* params = new DoseParams{this, dosingHeads, head, volume, logManager};
 
-    xTaskCreate([](void* param) {
+    BaseType_t result = xTaskCreate([](void* param) {
         DoseParams* p = (DoseParams*)param;
 
         DosingResult result = p->heads[p->head]->dispense(p->volume);
@@ -394,6 +550,12 @@ void SquareDoseBLEServer::handleDose(const JsonDocument& request, JsonDocument& 
         delete p;
         vTaskDelete(NULL);
     }, "BLEDoseTask", 4096, params, 1, NULL);
+
+    if (result != pdPASS) {
+        delete params;
+        response["success"] = false;
+        response["error"] = "Failed to start dose task";
+    }
 }
 
 void SquareDoseBLEServer::handleCalibrate(const JsonDocument& request, JsonDocument& response) {

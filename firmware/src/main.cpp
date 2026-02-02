@@ -1,6 +1,5 @@
 #include <Arduino.h>
 #include "network/wifi_manager.h"
-#include "network/WebServer.h"
 #include "network/BLEServer.h"
 #include "hal/MotorDriver.h"
 #include "hal/DosingHead.h"
@@ -24,7 +23,7 @@ DosingHead dosingHead2(1, &motorDriver);
 DosingHead dosingHead3(2, &motorDriver);
 DosingHead dosingHead4(3, &motorDriver);
 
-// Array of dosing head pointers for WebServer
+// Array of dosing head pointers for BLE server
 DosingHead* dosingHeads[4] = {&dosingHead1, &dosingHead2, &dosingHead3, &dosingHead4};
 
 // Schedule manager instance
@@ -35,9 +34,6 @@ DosingLogManager dosingLogManager;
 
 // Scheduler task instance
 SchedulerTask schedulerTask;
-
-// WebServer instance
-WebServer webServer(80);
 
 void setup() {
   Serial.begin(9600);
@@ -77,7 +73,7 @@ void setup() {
   if (wifiManager.getCurrentMode() == WIFIMANAGER_MODE_AP) {
     Serial.println("[Main] AP SSID: " + wifiManager.getAPSSID());
     Serial.println("[Main] AP Password: " + String(AP_PASSWORD));
-    Serial.println("[Main] Connect to AP and configure WiFi via /api/wifi/configure");
+    Serial.println("[Main] Connect via BLE to configure WiFi");
   }
 
   xTaskCreatePinnedToCore(
@@ -131,17 +127,6 @@ void setup() {
     Serial.println("[Main] ERROR: Scheduler Task initialization failed!");
   }
 
-  // Initialize Web Server
-  Serial.println("[Main] Initializing Web Server...");
-  if (webServer.begin(dosingHeads, 4, &motorDriver, &wifiManager, &scheduleManager, &dosingLogManager)) {
-    Serial.println("[Main] Web Server started successfully");
-    Serial.println("[Main] REST API available at:");
-    Serial.println("[Main]   http://" + wifiManager.getLocalIP() + "/api/status");
-    Serial.println("[Main]   WebSocket: ws://" + wifiManager.getLocalIP() + "/ws");
-  } else {
-    Serial.println("[Main] ERROR: Web Server initialization failed!");
-  }
-
   // Initialize BLE Server
   Serial.println("[Main] Initializing BLE Server...");
   if (squareDoseBLE.begin(dosingHeads, 4, &motorDriver, &wifiManager, &scheduleManager, &dosingLogManager)) {
@@ -162,8 +147,6 @@ void setup() {
   Serial.println("  {\"cmd\":\"wifi_configure\",\"ssid\":\"...\",\"password\":\"...\"}");
   Serial.println("  {\"cmd\":\"schedules_get\"}");
   Serial.println("  {\"cmd\":\"schedule_set\",\"head\":0,...}");
-  Serial.println("========================================");
-  Serial.println("  REST API also available on WiFi");
   Serial.println("========================================");
 }
 
